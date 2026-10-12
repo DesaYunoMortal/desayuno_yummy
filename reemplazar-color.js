@@ -1,3 +1,8 @@
+// Name: Reemplazar color
+// ID: colorswap
+// Description: Cambia colores de los disfraces solo mientras corre el juego, sin modificar el proyecto. Vectoriales y mapas de bits, varios colores a la vez.
+// License: MPL-2.0
+
 (function (Scratch) {
   'use strict';
 
@@ -8,18 +13,25 @@
   const vm = Scratch.vm;
   const runtime = vm.runtime;
   const Cast = Scratch.Cast;
-  
+
+  /* ------------------------------------------------------------------ *
+   *  Colores                                                           *
+   * ------------------------------------------------------------------ */
+
   const colorContext = document.createElement('canvas').getContext('2d');
   const colorCache = new Map();
   const NOT_A_COLOR = /^(?:none|inherit|initial|unset|revert|currentcolor|context-fill|context-stroke|url\(.*|var\(.*)$/;
 
+  // Convierte cualquier color CSS (#f00, #ff0000, red, rgb(), hsl()...) en {r, g, b, a}.
+  // Devuelve null si el texto no es un color.
   const parseColor = (input) => {
     const text = String(input).trim().toLowerCase();
     if (colorCache.has(text)) return colorCache.get(text);
 
     let result = null;
     if (text && !NOT_A_COLOR.test(text)) {
-
+      // Con un color inválido el canvas ignora la asignación y conserva el valor anterior,
+      // así que se prueba sobre dos valores distintos y se comparan los resultados.
       colorContext.fillStyle = '#000000';
       colorContext.fillStyle = text;
       const overBlack = colorContext.fillStyle;
@@ -46,6 +58,7 @@
     return {r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255};
   };
 
+  // Color de un valor: texto CSS o número decimal estilo Scratch (0xRRGGBB). null si no es un color.
   const colorFromValue = (value) => {
     if (typeof value === 'number') return Number.isFinite(value) ? fromDecimal(value) : null;
     const text = String(value).trim();
@@ -54,6 +67,7 @@
     return parsed ? {r: parsed.r, g: parsed.g, b: parsed.b} : null;
   };
 
+  // Texto CSS de un color; si el color original tenía transparencia, se conserva.
   const toCss = (color, alpha) => {
     if (alpha < 1) return `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
     return '#' + [color.r, color.g, color.b].map((v) => v.toString(16).padStart(2, '0')).join('');
@@ -61,6 +75,12 @@
 
   const sameColor = (a, b) => a.r === b.r && a.g === b.g && a.b === b.b;
 
+  /* ------------------------------------------------------------------ *
+   *  Texto con varios colores: "#00ff00 #ffff00 > #ffffff, #ff0000 > #0000ff"
+   *  Cada grupo es: uno o más colores de origen, una flecha y un color de destino.
+   * ------------------------------------------------------------------ */
+
+  // Parte el texto en colores y flechas (> -> => = →). Respeta los paréntesis: rgb(255, 0, 0).
   const tokenize = (text) => {
     const tokens = [];
     let current = '';
@@ -96,6 +116,7 @@
     return tokens;
   };
 
+  // Devuelve {groups: [{froms: [color], to: color}], problems: [texto]}.
   const parseMap = (text) => {
     const tokens = tokenize(String(text));
     const groups = [];
@@ -132,6 +153,15 @@
     return {groups, problems};
   };
 
+  /* ------------------------------------------------------------------ *
+   *  Reglas                                                            *
+   *  Una regla es {from, to, tolerance (0-255), costume (null = todos)}.*
+   *  Todas se aplican a la vez sobre los colores ORIGINALES del disfraz *
+   *  y no se encadenan: verde→amarillo y amarillo→rojo no vuelve rojo  *
+   *  lo que era verde. Si dos reglas coinciden, gana la más reciente.  *
+   * ------------------------------------------------------------------ */
+
+  // Índice de la regla que le toca a un color, o -1.
   const matchRule = (rules, r, g, b) => {
     for (let i = rules.length - 1; i >= 0; i--) {
       const {from, tolerance} = rules[i];
@@ -142,15 +172,23 @@
     return -1;
   };
 
+  /* ------------------------------------------------------------------ *
+   *  Disfraces vectoriales (SVG)                                       *
+   * ------------------------------------------------------------------ */
+
+  // Atributos de presentación que contienen un color.
   const COLOR_ATTRIBUTES = ['fill', 'stroke', 'stop-color', 'flood-color', 'lighting-color', 'color'];
+  // Las mismas propiedades cuando están dentro de un atributo style o de un bloque <style>.
   const CSS_DECLARATION = /(^|[;{\s])(fill|stroke|stop-color|flood-color|lighting-color|color)(\s*:\s*)([^;}]*)/gi;
 
+  // Devuelve {text, counts, changed} con el SVG recoloreado, o null si el SVG no se puede leer.
   const recolorSvg = (svgText, rules) => {
     const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
     if (doc.getElementsByTagName('parsererror').length > 0) return null;
 
     const counts = new Array(rules.length).fill(0);
 
+    // Si `value` es un color al que le toca una regla devuelve el color nuevo; si no, null.
     const swap = (value) => {
       const color = parseColor(value);
       if (!color || color.a === 0) return null;
@@ -194,12 +232,17 @@
     return {text: changed ? new XMLSerializer().serializeToString(doc) : svgText, counts, changed};
   };
 
+  /* ------------------------------------------------------------------ *
+   *  Disfraces de mapa de bits (PNG, JPG, GIF...)                      *
+   * ------------------------------------------------------------------ */
+
   const decodeImage = async (bytes) => {
     const blob = new Blob([bytes]);
     if (typeof createImageBitmap === 'function') {
       try {
         return await createImageBitmap(blob);
       } catch (error) {
+        // Si falla, se intenta con un <img>.
       }
     }
     const url = URL.createObjectURL(blob);
@@ -213,6 +256,7 @@
     }
   };
 
+  // Dibuja la imagen en un canvas del mismo tamaño. Devuelve null si la imagen está vacía.
   const imageToCanvas = async (bytes) => {
     const image = await decodeImage(bytes);
     const width = image.naturalWidth || image.width;
@@ -228,6 +272,7 @@
     return canvas;
   };
 
+  // Devuelve {canvas, counts, changed}; canvas es null si no hubo ningún cambio.
   const recolorBitmap = async (bytes, rules) => {
     const counts = new Array(rules.length).fill(0);
     const canvas = await imageToCanvas(bytes);
@@ -236,10 +281,10 @@
     const context = canvas.getContext('2d', {willReadFrequently: true});
     const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
     const pixels = imageData.data;
-    let lastKey = -1;
+    let lastKey = -1; // los píxeles vecinos suelen repetir color: se reutiliza la búsqueda anterior
     let lastIndex = -1;
     for (let i = 0; i < pixels.length; i += 4) {
-      if (pixels[i + 3] === 0) continue; 
+      if (pixels[i + 3] === 0) continue; // totalmente transparente: no se ve, se ignora
       const key = (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2];
       if (key !== lastKey) {
         lastKey = key;
@@ -249,7 +294,7 @@
         const to = rules[lastIndex].to;
         pixels[i] = to.r;
         pixels[i + 1] = to.g;
-        pixels[i + 2] = to.b;
+        pixels[i + 2] = to.b; // el alfa de cada píxel no se toca
         counts[lastIndex]++;
       }
     }
@@ -259,6 +304,13 @@
     context.putImageData(imageData, 0, 0);
     return {canvas, counts, changed: true};
   };
+
+  /* ------------------------------------------------------------------ *
+   *  Estado y dibujo                                                   *
+   *  Nunca se tocan los disfraces del proyecto (asset, id, tamaño...): *
+   *  solo se cambia lo que el renderer dibuja. Al detener el juego se  *
+   *  vuelve a dibujar cada disfraz desde su asset original.            *
+   * ------------------------------------------------------------------ */
 
   const MAX_RULES = 256; // reglas por sprite
   const MAX_UNDO = 20; // pasos para deshacer por sprite
