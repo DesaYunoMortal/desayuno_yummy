@@ -1,4 +1,3 @@
-// TurboWarp custom extension. Requires unsandboxed mode and the local bridge.
 (function (Scratch) {
   'use strict';
   if (!Scratch.extensions.unsandboxed) {
